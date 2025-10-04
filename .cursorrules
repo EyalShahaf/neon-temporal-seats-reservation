@@ -1,0 +1,117 @@
+# Cursor Rules — Temporal Seats
+
+## Intent
+Local-first demo of a flight seat reservation + payment system orchestrated with **Temporal (Go SDK)** plus a **Vite React UI**.
+- 15-minute seat hold (auto-release), **refresh on seat changes**.
+- Payment via **5-digit code**, **10s timeout**, **3 retries**, **~15% simulated failure**.
+- **Real-time status** via **SSE** from API.
+
+## Tech Stack
+- Go 1.22+, Temporal Go SDK
+- HTTP server with `net/http` (REST + SSE)
+- Vite + React + Tailwind (UI)
+- Docker Compose: Temporal + Temporal UI
+
+## Temporal (musts)
+- **OrderOrchestrationWorkflow(ctx, OrderInput)**
+  - Signals: `"UpdateSeats"`, `"SubmitPayment"`
+  - Query: `"GetStatus"` → `{state, seats, holdExpiresAt, attemptsLeft, lastError}`
+  - 15m hold timer; refresh on seat updates; release on expiry → `EXPIRED`
+- **SeatEntityWorkflow(flightID, seatID)** — workflowId `seat::<flightID>::<seatID>`
+  - Signal `"cmd"` with `{Type: HOLD|EXTEND|RELEASE, OrderID, TTL}`
+  - Only the **current holder** may extend/release
+- **Activities**
+  - `ValidatePaymentActivity(orderID, code)` with `StartToCloseTimeout=10s`, `RetryPolicy.MaximumAttempts=3`, **15% fail in the activity**
+  - `ConfirmOrderActivity`, `FailOrderActivity`
+- **Determinism**: no `time.Now`, `rand`, I/O, or goroutines in workflows. Side effects only in activities.
+
+## API (stable surface)
+- `POST /orders` → start workflow (returns `orderId`)
+- `POST /orders/{id}/seats` → signal `UpdateSeats`
+- `POST /orders/{id}/payment` → signal `SubmitPayment`
+- `GET  /orders/{id}/status` → query `GetStatus`
+- `GET  /orders/{id}/events` → **SSE** stream (server queries `GetStatus` ~1s)
+
+## UI (Vite + React + Tailwind)
+- Purpose: minimal seat grid, countdown, status & payment form; consumes SSE.
+- **Pages/Components**
+  - `OrderPage`: shows `OrderHeader`, `SeatGrid`, `Countdown`, `PaymentForm`
+  - `SeatGrid`: selects seats; POST `/orders/{id}/seats`
+  - `Countdown`: driven by SSE `holdExpiresAt`
+  - `PaymentForm`: POST `/orders/{id}/payment`
+- **SSE Hook** (client): `useEventSource(url)` that updates local state every event.
+- **Config**
+  - Dev URLs: API `http://localhost:8080`, UI `http://localhost:5173`
+  - CORS: enable on API for `localhost:5173`
+- **NPM Scripts**
+  - `dev`: `vite`
+  - `build`: `vite build`
+  - `preview`: `vite preview`
+- **Deployment (optional)**
+  - `vite build` → serve `ui/dist` as static by API or a simple file server
+
+## HTTP/SSE rules
+- JSON only; `Content-Type: application/json`
+- Map errors to `400/404/500`
+- SSE response headers: `text/event-stream`, `no-cache`, `keep-alive`
+- Tick interval configurable (`SSE_TICK_MS`, default 1000)
+
+## Testing (minimum)
+- Temporal test env: 
+  - Happy path (select → pay → confirmed)
+  - Hold refresh on seat update
+  - Auto-expire after 15m (time skipping)
+  - Payment retries (fail then succeed; also exhaust to `FAILED`)
+- API smoke: invalid ids, bad payment code
+
+## Style
+- Small files; pure types in `internal/domain`
+- No globals; `config.Load()` for env
+- `go fmt`/`go mod tidy` clean; explicit error handling
+
+## Non-Goals
+- No auth, no external payment provider, no DB (unless explicitly requested)
+
+## Snippets
+
+**Start workflow**
+```go
+we, err := c.ExecuteWorkflow(ctx, client.StartWorkflowOptions{
+  ID: "order::"+req.OrderID, TaskQueue: cfg.OrderTaskQueue,
+}, workflows.OrderOrchestrationWorkflow, workflows.OrderInput{ OrderID: req.OrderID, FlightID: req.FlightID })
+
+**Signal from workflow to seat entity**
+wfID := "seat::"+in.FlightID+"::"+seatID
+cmd := seat.Command{ OrderID: in.OrderID, TTL: 15*time.Minute, Type: seat.CmdHold }
+_ = workflow.SignalExternalWorkflow(ctx, wfID, "", "cmd", cmd).Get(ctx, nil)
+
+**UI SSE hook (pseudo)**
+function useEventSource(url:string){
+  const [data,setData]=useState<any>(null);
+  useEffect(()=>{ const es=new EventSource(url); es.onmessage=e=>setData(JSON.parse(e.data)); return ()=>es.close(); },[url]);
+  return data;
+}
+
+**Monorepo Structure**
+temporal-seats/
+├─ cmd/
+│  ├─ api/                 # HTTP (REST+SSE+Temporal client)
+│  └─ worker/              # Workflows + Activities registration
+├─ internal/
+│  ├─ activities/          # payment/order/seat (DB impl optional)
+│  ├─ config/              # env config
+│  ├─ domain/              # core types + DTOs
+│  ├─ entities/seat/       # SeatEntityWorkflow
+│  ├─ realtime/sse/        # SSE helper
+│  ├─ transport/http/      # router + handlers
+│  └─ workflows/           # OrderOrchestrationWorkflow
+├─ ui/                     # Vite + React + Tailwind UI
+│  ├─ src/                 # components/hooks/pages
+│  └─ index.html
+├─ infra/
+│  ├─ docker-compose.yml   # Temporal + Temporal UI
+│  └─ local.env
+├─ test/                   # Temporal + API tests
+├─ Makefile
+├─ go.mod
+└─ README.md

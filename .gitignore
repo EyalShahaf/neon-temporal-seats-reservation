@@ -1,0 +1,13 @@
+# Go
+bin/
+coverage.out
+*.test
+
+# Node/Vite
+ui/node_modules/
+ui/dist/
+
+# OS/IDE
+.DS_Store
+.idea/
+.vscode/
