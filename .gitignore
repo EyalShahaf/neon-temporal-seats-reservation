@@ -2,6 +2,7 @@
 bin/
 coverage.out
 *.test
+main
 
 # Node/Vite
 ui/node_modules/
