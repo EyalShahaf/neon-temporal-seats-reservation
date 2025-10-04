@@ -439,15 +439,6 @@ For a production deployment, consider:
 
 ---
 
-## 📚 Further Reading
-
-- [Temporal Documentation](https://docs.temporal.io/)
-- [Entity Workflow Pattern](https://docs.temporal.io/encyclopedia/entity-workflows)
-- [Saga Pattern](https://docs.temporal.io/encyclopedia/saga-pattern)
-- [Server-Sent Events](https://developer.mozilla.org/en-US/docs/Web/API/Server-sent_events)
-
----
-
 ## 📄 License
 
 This is a home assignment project for demonstration purposes.
