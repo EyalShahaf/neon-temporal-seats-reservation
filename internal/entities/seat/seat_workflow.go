@@ -40,92 +40,154 @@ type SeatState struct {
 
 // SeatEntityWorkflow manages the state of a single seat.
 // Its workflow ID should be "seat::<flightID>::<seatID>".
-func SeatEntityWorkflow(ctx workflow.Context, flightID, seatID string) error {
+func SeatEntityWorkflow(ctx workflow.Context, flightID, seatID string, initial *seatState) error {
 	logger := workflow.GetLogger(ctx)
 	logger.Info("Starting SeatEntityWorkflow", "FlightID", flightID, "SeatID", seatID)
 
-	state := seatState{isHeld: false}
+	state := seatState{}
+	if initial != nil {
+		state = *initial
+		logger.Info("Restored state from ContinueAsNew", "IsHeld", state.isHeld, "IsConfirmed", state.isConfirmed, "HeldBy", state.heldBy, "ConfirmedBy", state.confirmedBy)
+	}
+
 	cmdChan := workflow.GetSignalChannel(ctx, "cmd")
+	var holdTimer workflow.Future
+	var holdCancel workflow.CancelFunc
 	processed := 0
 
 	// Register query handler to expose seat state
 	workflow.SetQueryHandler(ctx, "GetState", func() (SeatState, error) {
+		var exp string
+		if !state.expiresAt.IsZero() {
+			exp = state.expiresAt.Format(time.RFC3339)
+		}
 		return SeatState{
 			IsHeld:      state.isHeld,
 			IsConfirmed: state.isConfirmed,
 			HeldBy:      state.heldBy,
 			ConfirmedBy: state.confirmedBy,
-			ExpiresAt:   state.expiresAt.Format(time.RFC3339),
+			ExpiresAt:   exp,
 		}, nil
 	})
 
-	for {
-		// Block until a command is received.
-		var cmd Command
-		cmdChan.Receive(ctx, &cmd)
-		logger.Info("Received command", "Type", cmd.Type, "OrderID", cmd.OrderID)
-
-		switch cmd.Type {
-		case CmdHold:
-			// Reject hold if seat is already confirmed by another order
-			if state.isConfirmed {
-				logger.Warn("Cannot hold - seat is confirmed by another order", "ConfirmedBy", state.confirmedBy)
-				continue
-			}
-			// Reject hold if seat is already held and not expired
-			if state.isHeld && !workflow.Now(ctx).After(state.expiresAt) {
-				logger.Warn("Seat is already held and not expired", "HeldBy", state.heldBy)
-				continue
-			}
-			state.isHeld = true
-			state.heldBy = cmd.OrderID
-			state.expiresAt = workflow.Now(ctx).Add(cmd.TTL)
-			logger.Info("Seat is now HELD", "HeldBy", state.heldBy, "ExpiresAt", state.expiresAt)
-
-			// Start a timer to auto-release the seat
-			timerCtx, cancelTimer := workflow.WithCancel(ctx)
-			timer := workflow.NewTimer(timerCtx, cmd.TTL)
-			selector := workflow.NewSelector(ctx)
-			selector.AddFuture(timer, func(f workflow.Future) {
-				logger.Info("Hold expired, releasing seat.", "HeldBy", state.heldBy)
-				state.isHeld = false
-				state.heldBy = ""
-			})
-
-			// While waiting for the timer, listen for other commands (e.g. RELEASE)
-			selector.AddReceive(cmdChan, func(c workflow.ReceiveChannel, more bool) {
-				c.Receive(ctx, &cmd) // process this new command in the next loop iteration
-				cancelTimer()        // cancel the auto-release timer
-			})
-
-			selector.Select(ctx)
-
-		case CmdRelease:
-			if state.isHeld && state.heldBy == cmd.OrderID {
-				state.isHeld = false
-				state.heldBy = ""
-				logger.Info("Seat released by order.", "OrderID", cmd.OrderID)
-			}
-
-		case CmdConfirm:
-			// Reject confirm if seat is already confirmed by another order
-			if state.isConfirmed {
-				logger.Warn("Seat already confirmed by another order", "ConfirmedBy", state.confirmedBy)
-				continue
-			}
-			// Confirm the seat permanently
-			state.isConfirmed = true
-			state.confirmedBy = cmd.OrderID
-			state.isHeld = false // Clear hold since it's now confirmed
-			state.heldBy = ""    // Clear heldBy since it's now confirmed
-			logger.Info("Seat PERMANENTLY CONFIRMED", "ConfirmedBy", state.confirmedBy)
+	makeHoldTimer := func(ttl time.Duration) {
+		// cancel previous timer (if any)
+		if holdCancel != nil {
+			holdCancel()
+			holdCancel = nil
+			holdTimer = nil
 		}
+		holdCtx, cancel := workflow.WithCancel(ctx)
+		holdCancel = cancel
+		holdTimer = workflow.NewTimer(holdCtx, ttl)
+		state.expiresAt = workflow.Now(ctx).Add(ttl)
+	}
+
+	clearHold := func() {
+		state.isHeld = false
+		state.heldBy = ""
+		state.expiresAt = time.Time{}
+		if holdCancel != nil {
+			holdCancel()
+			holdCancel = nil
+			holdTimer = nil
+		}
+	}
+
+	// Restore timer if seat was held and not expired
+	if state.isHeld && !state.expiresAt.IsZero() && workflow.Now(ctx).Before(state.expiresAt) {
+		// Re-arm timer for remaining duration
+		remaining := state.expiresAt.Sub(workflow.Now(ctx))
+		holdCtx, cancel := workflow.WithCancel(ctx)
+		holdCancel = cancel
+		holdTimer = workflow.NewTimer(holdCtx, remaining)
+		logger.Info("Restored hold timer", "Remaining", remaining, "HeldBy", state.heldBy)
+	} else if state.isHeld {
+		// Hold already expired between runs
+		logger.Info("Hold expired during ContinueAsNew, clearing", "HeldBy", state.heldBy)
+		state.isHeld = false
+		state.heldBy = ""
+		state.expiresAt = time.Time{}
+	}
+
+	for {
+		sel := workflow.NewSelector(ctx)
+
+		// Incoming commands
+		sel.AddReceive(cmdChan, func(c workflow.ReceiveChannel, more bool) {
+			var cmd Command
+			c.Receive(ctx, &cmd)
+			logger.Info("Received command", "Type", cmd.Type, "OrderID", cmd.OrderID)
+
+			// Early guard: ignore all commands on confirmed seats except idempotent confirm
+			if state.isConfirmed {
+				if cmd.Type == CmdConfirm && cmd.OrderID == state.confirmedBy {
+					logger.Info("Confirm idempotent - already confirmed", "OrderID", cmd.OrderID)
+				} else {
+					logger.Warn("Ignoring command on confirmed seat", "Type", cmd.Type, "ConfirmedBy", state.confirmedBy)
+				}
+				return
+			}
+
+			switch cmd.Type {
+
+			case CmdHold:
+				// If already held by someone else and not expired, reject
+				if state.isHeld && state.heldBy != cmd.OrderID && workflow.Now(ctx).Before(state.expiresAt) {
+					logger.Warn("Seat already held and not expired", "HeldBy", state.heldBy)
+					return
+				}
+				// Grant/refresh hold for this order
+				state.isHeld = true
+				state.heldBy = cmd.OrderID
+				makeHoldTimer(cmd.TTL)
+				logger.Info("Seat HELD", "HeldBy", state.heldBy, "ExpiresAt", state.expiresAt)
+
+			case CmdExtend:
+				// Only the current holder may extend
+				if state.isHeld && state.heldBy == cmd.OrderID {
+					makeHoldTimer(cmd.TTL)
+					logger.Info("Seat HOLD EXTENDED", "HeldBy", state.heldBy, "ExpiresAt", state.expiresAt)
+				} else {
+					logger.Warn("Extend ignored - not held by this order", "HeldBy", state.heldBy, "OrderID", cmd.OrderID)
+				}
+
+			case CmdRelease:
+				if state.isHeld && state.heldBy == cmd.OrderID {
+					clearHold()
+					logger.Info("Seat RELEASED by order", "OrderID", cmd.OrderID)
+				} else {
+					logger.Warn("Release ignored - not held by this order", "HeldBy", state.heldBy, "OrderID", cmd.OrderID)
+				}
+
+			case CmdConfirm:
+				// Only holder can confirm; once confirmed, make it permanent
+				if !state.isHeld || state.heldBy != cmd.OrderID {
+					logger.Warn("Confirm ignored - seat not held by this order", "HeldBy", state.heldBy, "OrderID", cmd.OrderID)
+					return
+				}
+				state.isConfirmed = true
+				state.confirmedBy = cmd.OrderID
+				clearHold()
+				logger.Info("Seat PERMANENTLY CONFIRMED", "ConfirmedBy", state.confirmedBy)
+			}
+		})
+
+		// Hold expiry
+		if holdTimer != nil {
+			sel.AddFuture(holdTimer, func(f workflow.Future) {
+				// Timer fired (not canceled) → release hold
+				logger.Info("Hold EXPIRED, releasing seat", "HeldBy", state.heldBy)
+				clearHold()
+			})
+		}
+
+		sel.Select(ctx)
 
 		processed++
 		if processed%1000 == 0 {
-			// Keep running forever; trim history via ContinueAsNew
 			logger.Info("Continuing as new to trim history", "Processed", processed)
-			return workflow.NewContinueAsNewError(ctx, SeatEntityWorkflow, flightID, seatID)
+			return workflow.NewContinueAsNewError(ctx, SeatEntityWorkflow, flightID, seatID, &state)
 		}
 	}
 }

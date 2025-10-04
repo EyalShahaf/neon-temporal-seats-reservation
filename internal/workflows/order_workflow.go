@@ -28,6 +28,7 @@ type OrderState struct {
 	HoldExpiresAt  time.Time `json:"HoldExpiresAt"`
 	AttemptsLeft   int       `json:"AttemptsLeft"`
 	LastPaymentErr string    `json:"LastPaymentErr,omitempty"`
+	PaymentStatus  string    `json:"PaymentStatus,omitempty"` // NEW: trying, retrying, failed, success
 }
 
 // OrderOrchestrationWorkflow is the main Temporal workflow for an entire seat reservation and payment process.
@@ -68,9 +69,14 @@ func OrderOrchestrationWorkflow(ctx workflow.Context, input OrderInput) error {
 
 	for _, seatID := range seats {
 		cmd := seat.Command{Type: seat.CmdHold, OrderID: input.OrderID, TTL: 15 * time.Minute}
-		_ = workflow.ExecuteActivity(ctxA, activities.SeatSignalActivity, activities.SeatSignalInput{
+		err := workflow.ExecuteActivity(ctxA, "SeatSignalActivity", activities.SeatSignalInput{
 			FlightID: input.FlightID, SeatID: seatID, Cmd: cmd,
 		}).Get(ctx, nil)
+		if err != nil {
+			logger.Error("Failed to hold seat", "SeatID", seatID, "Error", err)
+		} else {
+			logger.Info("Successfully held seat", "SeatID", seatID)
+		}
 	}
 
 	state.Seats = seats
@@ -104,17 +110,27 @@ func OrderOrchestrationWorkflow(ctx workflow.Context, input OrderInput) error {
 			// Release old seats
 			for _, seatID := range toRelease {
 				cmd := seat.Command{Type: seat.CmdRelease, OrderID: input.OrderID}
-				_ = workflow.ExecuteActivity(ctxA, activities.SeatSignalActivity, activities.SeatSignalInput{
+				err := workflow.ExecuteActivity(ctxA, "SeatSignalActivity", activities.SeatSignalInput{
 					FlightID: input.FlightID, SeatID: seatID, Cmd: cmd,
 				}).Get(ctx, nil)
+				if err != nil {
+					logger.Error("Failed to release seat", "SeatID", seatID, "Error", err)
+				} else {
+					logger.Info("Successfully released seat", "SeatID", seatID)
+				}
 			}
 
 			// Hold new seats
 			for _, seatID := range toHold {
 				cmd := seat.Command{Type: seat.CmdHold, OrderID: input.OrderID, TTL: 15 * time.Minute}
-				_ = workflow.ExecuteActivity(ctxA, activities.SeatSignalActivity, activities.SeatSignalInput{
+				err := workflow.ExecuteActivity(ctxA, "SeatSignalActivity", activities.SeatSignalInput{
 					FlightID: input.FlightID, SeatID: seatID, Cmd: cmd,
 				}).Get(ctx, nil)
+				if err != nil {
+					logger.Error("Failed to hold seat", "SeatID", seatID, "Error", err)
+				} else {
+					logger.Info("Successfully held seat", "SeatID", seatID)
+				}
 			}
 
 			state.Seats = newSeats
@@ -128,9 +144,14 @@ func OrderOrchestrationWorkflow(ctx workflow.Context, input OrderInput) error {
 
 			if state.AttemptsLeft <= 0 {
 				logger.Warn("No payment attempts left.")
+				state.PaymentStatus = "failed"
 				return
 			}
 			state.AttemptsLeft--
+
+			// Emit payment trying signal
+			state.PaymentStatus = "trying"
+			logger.Info("Payment attempt started", "AttemptsLeft", state.AttemptsLeft)
 
 			// Set up activity options with built-in retry policy
 			activityOpts := workflow.ActivityOptions{
@@ -151,10 +172,35 @@ func OrderOrchestrationWorkflow(ctx workflow.Context, input OrderInput) error {
 			if err != nil {
 				logger.Error("Payment activity failed after all retries", "error", err)
 				state.LastPaymentErr = err.Error()
-				state.State = "FAILED"
-				logger.Error("Order failed after maximum payment attempts.")
+				state.PaymentStatus = "failed"
+
+				// If we have attempts left, set to retrying, otherwise failed
+				if state.AttemptsLeft > 0 {
+					state.PaymentStatus = "retrying"
+					logger.Info("Payment failed, will retry", "AttemptsLeft", state.AttemptsLeft)
+				} else {
+					state.State = "FAILED"
+					logger.Error("Order failed after maximum payment attempts.")
+				}
 			} else {
 				logger.Info("Payment successful")
+				state.PaymentStatus = "success"
+
+				// Send CONFIRM signals to all seats to permanently lock them
+				logger.Info("Payment confirmed, permanently locking seats", "Seats", state.Seats)
+				for _, seatID := range state.Seats {
+					cmd := seat.Command{Type: seat.CmdConfirm, OrderID: input.OrderID}
+					err := workflow.ExecuteActivity(ctxA, "SeatSignalActivity", activities.SeatSignalInput{
+						FlightID: input.FlightID, SeatID: seatID, Cmd: cmd,
+					}).Get(ctx, nil)
+					if err != nil {
+						logger.Error("Failed to confirm seat", "SeatID", seatID, "Error", err)
+					} else {
+						logger.Info("Successfully confirmed seat", "SeatID", seatID)
+					}
+				}
+
+				// Set state to CONFIRMED AFTER sending confirm signals
 				state.State = "CONFIRMED"
 			}
 		})
@@ -164,6 +210,8 @@ func OrderOrchestrationWorkflow(ctx workflow.Context, input OrderInput) error {
 	}
 
 	// Post-loop logic based on final state
+	logger.Info("Order workflow main loop completed, processing final state", "FinalState", state.State)
+
 	activityOpts := workflow.ActivityOptions{StartToCloseTimeout: 10 * time.Second}
 	ctx = workflow.WithActivityOptions(ctx, activityOpts)
 
@@ -178,24 +226,21 @@ func OrderOrchestrationWorkflow(ctx workflow.Context, input OrderInput) error {
 	switch state.State {
 	case "CONFIRMED":
 		_ = workflow.ExecuteActivity(ctx, activities.ConfirmOrderActivity, input.OrderID).Get(ctx, nil)
-
-		// Send CONFIRM signals to all seats to permanently lock them
-		logger.Info("Payment confirmed, permanently locking seats", "Seats", state.Seats)
-		for _, seatID := range state.Seats {
-			cmd := seat.Command{Type: seat.CmdConfirm, OrderID: input.OrderID}
-			_ = workflow.ExecuteActivity(ctxA, activities.SeatSignalActivity, activities.SeatSignalInput{
-				FlightID: input.FlightID, SeatID: seatID, Cmd: cmd,
-			}).Get(ctx, nil)
-		}
+		logger.Info("Order confirmed, seats already locked in main loop")
 	case "FAILED", "EXPIRED":
 		// Best-effort attempt to release seats
 		dCtx, cancel := workflow.NewDisconnectedContext(ctx)
 		defer cancel()
 		for _, seatID := range state.Seats {
 			cmd := seat.Command{Type: seat.CmdRelease, OrderID: input.OrderID}
-			_ = workflow.ExecuteActivity(dCtx, activities.SeatSignalActivity, activities.SeatSignalInput{
+			err := workflow.ExecuteActivity(dCtx, "SeatSignalActivity", activities.SeatSignalInput{
 				FlightID: input.FlightID, SeatID: seatID, Cmd: cmd,
 			}).Get(dCtx, nil)
+			if err != nil {
+				logger.Error("Failed to release seat", "SeatID", seatID, "Error", err)
+			} else {
+				logger.Info("Successfully released seat", "SeatID", seatID)
+			}
 		}
 		_ = workflow.ExecuteActivity(ctx, activities.FailOrderActivity, input.OrderID).Get(ctx, nil)
 	}

@@ -5,7 +5,8 @@ interface SeatGridProps {
   selectedSeats: string[];
   onSeatsChanged: (seats: string[]) => void;
   isLocked: boolean;
-  flightID?: string; // NEW - for fetching seat availability
+  flightID?: string; // for fetching seat availability
+  currentOrderSeats?: string[]; // seats held by the current order
 }
 
 interface SeatAvailability {
@@ -17,7 +18,7 @@ interface SeatAvailability {
 const SEAT_ROWS = 5;
 const SEAT_COLS = 6;
 
-const SeatGrid: React.FC<SeatGridProps> = ({ selectedSeats, onSeatsChanged, isLocked, flightID }) => {
+const SeatGrid: React.FC<SeatGridProps> = ({ selectedSeats, onSeatsChanged, isLocked, flightID, currentOrderSeats = [] }) => {
   const [localSelection, setLocalSelection] = useState<string[]>(selectedSeats);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [lastClickedSeat, setLastClickedSeat] = useState<{ seatId: string; time: number } | null>(null);
@@ -52,21 +53,26 @@ const SeatGrid: React.FC<SeatGridProps> = ({ selectedSeats, onSeatsChanged, isLo
     const localSorted = [...localSelection].sort().join(',');
     const parentSorted = [...selectedSeats].sort().join(',');
     
-    if (isConfirming || localSorted === parentSorted) {
-      setLocalSelection(selectedSeats);
-      if (isConfirming) {
+    if (isConfirming) {
+      // When confirming, only sync if parent has the same seats we're confirming
+      if (localSorted === parentSorted) {
+        setLocalSelection(selectedSeats);
         setIsConfirming(false);
       }
+      // If parent doesn't match yet, keep waiting (don't sync)
+    } else if (localSorted === parentSorted) {
+      // Normal sync when not confirming and states match
+      setLocalSelection(selectedSeats);
     }
-  }, [selectedSeats, isConfirming, localSelection]);
+  }, [selectedSeats, isConfirming]);
 
   const handleSeatClick = (seatId: string) => {
     if (isLocked || isConfirming) return;
     
     // Check if seat is unavailable (held or confirmed by others)
-    const isSeatUnavailable = seatAvailability.held.includes(seatId) || seatAvailability.confirmed.includes(seatId);
-    if (isSeatUnavailable) {
-      return; // Don't allow clicking on unavailable seats
+    const seatState = getSeatState(seatId);
+    if (seatState === 'held-by-others' || seatState === 'confirmed-by-others') {
+      return; // Don't allow clicking on seats held/confirmed by others
     }
     
     // Prevent rapid clicking on the SAME seat (debounce per seat)
@@ -101,9 +107,25 @@ const SeatGrid: React.FC<SeatGridProps> = ({ selectedSeats, onSeatsChanged, isLo
     JSON.stringify(localSelection.sort()) !== JSON.stringify(selectedSeats.sort());
 
   const getSeatState = (seatId: string) => {
-    if (seatAvailability.confirmed.includes(seatId)) return 'confirmed';
-    if (seatAvailability.held.includes(seatId)) return 'held';
+    // Check if seat is confirmed by anyone
+    if (seatAvailability.confirmed.includes(seatId)) {
+      // If it's confirmed by the current order, show as "confirmed by you"
+      if (currentOrderSeats.includes(seatId)) return 'confirmed-by-you';
+      // Otherwise show as "confirmed by others"
+      return 'confirmed-by-others';
+    }
+    
+    // Check if seat is held by anyone
+    if (seatAvailability.held.includes(seatId)) {
+      // If it's held by the current order, show as "held by you"
+      if (currentOrderSeats.includes(seatId)) return 'held-by-you';
+      // Otherwise show as "held by others"
+      return 'held-by-others';
+    }
+    
+    // Check if seat is selected locally (before confirmation)
     if (localSelection.includes(seatId)) return 'selected';
+    
     return 'available';
   };
 
@@ -113,7 +135,6 @@ const SeatGrid: React.FC<SeatGridProps> = ({ selectedSeats, onSeatsChanged, isLo
       const seatId = `${row}${String.fromCharCode(64 + col)}`;
       const seatState = getSeatState(seatId);
       const isLocallySelected = localSelection.includes(seatId);
-      const isConfirmed = selectedSeats.includes(seatId);
       const isBeingConfirmed = isConfirming && isLocallySelected;
 
       seats.push(
@@ -124,19 +145,21 @@ const SeatGrid: React.FC<SeatGridProps> = ({ selectedSeats, onSeatsChanged, isLo
             'w-14 h-14 rounded-lg flex items-center justify-center font-bold text-sm select-none transition-all duration-200 border-2 relative',
             {
               // Available seats
-              'bg-gray-700 hover:bg-gray-600 cursor-pointer border-gray-600 text-gray-300 hover:text-white hover:border-cyan-500/50': seatState === 'available' && !isLocallySelected && !isConfirmed && !isLocked && !isConfirming,
-              // Selected seats
-              'bg-cyan-500/20 border-cyan-500 text-cyan-400 cursor-pointer hover:bg-cyan-500/30 shadow-lg shadow-cyan-500/25': isLocallySelected && !isBeingConfirmed,
-              // Being confirmed
+              'bg-gray-700 hover:bg-gray-600 cursor-pointer border-gray-600 text-gray-300 hover:text-white hover:border-cyan-500/50': seatState === 'available' && !isLocked && !isConfirming,
+              // Selected seats (blue)
+              'bg-cyan-500/20 border-cyan-500 text-cyan-400 cursor-pointer hover:bg-cyan-500/30 shadow-lg shadow-cyan-500/25': seatState === 'selected' && !isBeingConfirmed,
+              // Being confirmed (orange)
               'bg-orange-500/20 border-orange-500 text-orange-400 cursor-not-allowed shadow-lg shadow-orange-500/25': isBeingConfirmed,
-              // Confirmed by this order
-              'bg-green-500/20 border-green-500 text-green-400': isConfirmed,
+              // Held by you (orange)
+              'bg-orange-500/20 border-orange-500 text-orange-400': seatState === 'held-by-you',
+              // Confirmed by you (green)
+              'bg-green-500/20 border-green-500 text-green-400': seatState === 'confirmed-by-you',
               // Held by others (yellow)
-              'bg-yellow-500/20 border-yellow-500 text-yellow-400 cursor-not-allowed': seatState === 'held',
+              'bg-yellow-500/20 border-yellow-500 text-yellow-400 cursor-not-allowed': seatState === 'held-by-others',
               // Confirmed by others (red)
-              'bg-red-500/20 border-red-500 text-red-400 cursor-not-allowed': seatState === 'confirmed',
+              'bg-red-500/20 border-red-500 text-red-400 cursor-not-allowed': seatState === 'confirmed-by-others',
               // Disabled states
-              'bg-gray-800 text-gray-500 cursor-not-allowed border-gray-700': (isLocked || isConfirming) && !isLocallySelected && !isConfirmed,
+              'bg-gray-800 text-gray-500 cursor-not-allowed border-gray-700': (isLocked || isConfirming) && seatState === 'available',
             }
           )}
         >
@@ -147,10 +170,13 @@ const SeatGrid: React.FC<SeatGridProps> = ({ selectedSeats, onSeatsChanged, isLo
           {isBeingConfirmed && (
             <div className="absolute -top-1 -right-1 w-3 h-3 bg-orange-400 rounded-full animate-pulse"></div>
           )}
-          {seatState === 'held' && (
+          {seatState === 'held-by-you' && (
+            <div className="absolute -top-1 -right-1 w-3 h-3 bg-orange-400 rounded-full"></div>
+          )}
+          {seatState === 'held-by-others' && (
             <div className="absolute -top-1 -right-1 w-3 h-3 bg-yellow-400 rounded-full"></div>
           )}
-          {seatState === 'confirmed' && (
+          {seatState === 'confirmed-by-others' && (
             <div className="absolute -top-1 -right-1 w-3 h-3 bg-red-400 rounded-full"></div>
           )}
         </div>
@@ -180,6 +206,10 @@ const SeatGrid: React.FC<SeatGridProps> = ({ selectedSeats, onSeatsChanged, isLo
         <div className="flex items-center gap-2">
           <div className="w-3 h-3 bg-cyan-500/20 border border-cyan-500 rounded"></div>
           <span>Selected</span>
+        </div>
+        <div className="flex items-center gap-2">
+          <div className="w-3 h-3 bg-orange-500/20 border border-orange-500 rounded"></div>
+          <span>Held by you</span>
         </div>
         <div className="flex items-center gap-2">
           <div className="w-3 h-3 bg-yellow-500/20 border border-yellow-500 rounded"></div>

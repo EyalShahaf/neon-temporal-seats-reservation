@@ -12,6 +12,7 @@ interface OrderState {
   HoldExpiresAt: string; // ISO 8601 string
   AttemptsLeft: number;
   LastPaymentErr: string;
+  PaymentStatus?: string; // NEW: trying, retrying, failed, success
 }
 
 const API_BASE_URL = 'http://localhost:8080';
@@ -118,6 +119,7 @@ const OrderPage: React.FC = () => {
             onSeatsChanged={handleSeatsChanged}
             isLocked={orderState.State !== 'PENDING' && orderState.State !== 'SEATS_SELECTED'}
             flightID={FLIGHT_ID}
+            currentOrderSeats={orderState.Seats}
           />
         </div>
 
@@ -130,6 +132,7 @@ const OrderPage: React.FC = () => {
             <PaymentForm
               attemptsLeft={orderState.AttemptsLeft}
               lastError={orderState.LastPaymentErr}
+              paymentStatus={orderState.PaymentStatus}
               onSubmit={handlePaymentSubmit}
               isLocked={orderState.State !== 'SEATS_SELECTED'}
             />

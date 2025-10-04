@@ -30,4 +30,5 @@ type GetStatusResponse struct {
 	HoldExpiresAt *time.Time `json:"holdExpiresAt,omitempty"`
 	AttemptsLeft  int        `json:"attemptsLeft"`
 	LastError     string     `json:"lastError,omitempty"`
+	PaymentStatus string     `json:"paymentStatus,omitempty"` // NEW: trying, retrying, failed, success
 }

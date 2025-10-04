@@ -4,6 +4,7 @@ interface PaymentFormProps {
   attemptsLeft: number;
   lastError: string;
   isLocked: boolean;
+  paymentStatus?: string; // NEW: trying, retrying, failed, success
   onSubmit: (paymentCode: string) => void;
 }
 
@@ -11,6 +12,7 @@ const PaymentForm: React.FC<PaymentFormProps> = ({
   attemptsLeft,
   lastError,
   isLocked,
+  paymentStatus,
   onSubmit,
 }) => {
   const [code, setCode] = useState('');
@@ -46,6 +48,29 @@ const PaymentForm: React.FC<PaymentFormProps> = ({
       {lastError && (
         <div className="bg-red-500/20 border border-red-500/50 rounded-lg p-3">
           <p className="text-sm text-red-400 font-mono">Error: {lastError}</p>
+        </div>
+      )}
+
+      {paymentStatus && (
+        <div className={`border rounded-lg p-3 ${
+          paymentStatus === 'trying' ? 'bg-blue-500/20 border-blue-500/50' :
+          paymentStatus === 'retrying' ? 'bg-yellow-500/20 border-yellow-500/50' :
+          paymentStatus === 'failed' ? 'bg-red-500/20 border-red-500/50' :
+          paymentStatus === 'success' ? 'bg-green-500/20 border-green-500/50' :
+          'bg-gray-500/20 border-gray-500/50'
+        }`}>
+          <p className={`text-sm font-mono ${
+            paymentStatus === 'trying' ? 'text-blue-400' :
+            paymentStatus === 'retrying' ? 'text-yellow-400' :
+            paymentStatus === 'failed' ? 'text-red-400' :
+            paymentStatus === 'success' ? 'text-green-400' :
+            'text-gray-400'
+          }`}>
+            {paymentStatus === 'trying' && '🔄 Processing payment...'}
+            {paymentStatus === 'retrying' && '🔄 Payment failed, retrying...'}
+            {paymentStatus === 'failed' && '❌ Payment failed'}
+            {paymentStatus === 'success' && '✅ Payment successful!'}
+          </p>
         </div>
       )}
 
