@@ -24,7 +24,7 @@ func (s *SeatWorkflowTestSuite) TestSeatWorkflow_CanStart() {
 
 	// Test that the workflow can be started without crashing
 	// The workflow will timeout in test environment, which is expected
-	env.ExecuteWorkflow(SeatEntityWorkflow, flightID, seatID)
+	env.ExecuteWorkflow(SeatEntityWorkflow, flightID, seatID, (*SeatPersistedState)(nil))
 
 	// In test environment, the workflow will complete due to timeout
 	// This is expected behavior for infinite loop workflows in tests

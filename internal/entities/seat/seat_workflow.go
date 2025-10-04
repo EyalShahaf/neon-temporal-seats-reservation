@@ -29,6 +29,15 @@ type seatState struct {
 	expiresAt   time.Time
 }
 
+// SeatPersistedState is the exported DTO for Continue-As-New serialization
+type SeatPersistedState struct {
+	IsHeld      bool      `json:"isHeld"`
+	IsConfirmed bool      `json:"isConfirmed"`
+	HeldBy      string    `json:"heldBy"`
+	ConfirmedBy string    `json:"confirmedBy"`
+	ExpiresAt   time.Time `json:"expiresAt"`
+}
+
 // SeatState represents the public state of a seat
 type SeatState struct {
 	IsHeld      bool   `json:"isHeld"`
@@ -40,13 +49,19 @@ type SeatState struct {
 
 // SeatEntityWorkflow manages the state of a single seat.
 // Its workflow ID should be "seat::<flightID>::<seatID>".
-func SeatEntityWorkflow(ctx workflow.Context, flightID, seatID string, initial *seatState) error {
+func SeatEntityWorkflow(ctx workflow.Context, flightID, seatID string, initial *SeatPersistedState) error {
 	logger := workflow.GetLogger(ctx)
 	logger.Info("Starting SeatEntityWorkflow", "FlightID", flightID, "SeatID", seatID)
 
 	state := seatState{}
 	if initial != nil {
-		state = *initial
+		state = seatState{
+			isHeld:      initial.IsHeld,
+			isConfirmed: initial.IsConfirmed,
+			heldBy:      initial.HeldBy,
+			confirmedBy: initial.ConfirmedBy,
+			expiresAt:   initial.ExpiresAt,
+		}
 		logger.Info("Restored state from ContinueAsNew", "IsHeld", state.isHeld, "IsConfirmed", state.isConfirmed, "HeldBy", state.heldBy, "ConfirmedBy", state.confirmedBy)
 	}
 
@@ -71,6 +86,11 @@ func SeatEntityWorkflow(ctx workflow.Context, flightID, seatID string, initial *
 	})
 
 	makeHoldTimer := func(ttl time.Duration) {
+		// Clamp TTL defensively to prevent zero/negative values
+		if ttl < time.Second {
+			ttl = time.Second
+		}
+
 		// cancel previous timer (if any)
 		if holdCancel != nil {
 			holdCancel()
@@ -187,7 +207,14 @@ func SeatEntityWorkflow(ctx workflow.Context, flightID, seatID string, initial *
 		processed++
 		if processed%1000 == 0 {
 			logger.Info("Continuing as new to trim history", "Processed", processed)
-			return workflow.NewContinueAsNewError(ctx, SeatEntityWorkflow, flightID, seatID, &state)
+			return workflow.NewContinueAsNewError(ctx, SeatEntityWorkflow, flightID, seatID,
+				&SeatPersistedState{
+					IsHeld:      state.isHeld,
+					IsConfirmed: state.isConfirmed,
+					HeldBy:      state.heldBy,
+					ConfirmedBy: state.confirmedBy,
+					ExpiresAt:   state.expiresAt,
+				})
 		}
 	}
 }

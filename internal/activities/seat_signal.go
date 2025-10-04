@@ -53,7 +53,7 @@ func SeatSignalActivity(ctx context.Context, in SeatSignalInput) error {
 			WorkflowRunTimeout:       365 * 24 * time.Hour,  // rotate via ContinueAsNew
 		},
 		seat.SeatEntityWorkflow,
-		in.FlightID, in.SeatID, // entity workflow args
+		in.FlightID, in.SeatID, (*seat.SeatPersistedState)(nil), // entity workflow args
 	)
 	return err
 }
