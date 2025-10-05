@@ -2,6 +2,7 @@ package http
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -10,6 +11,7 @@ import (
 	"github.com/EyalShahaf/temporal-seats/internal/domain"
 	"github.com/EyalShahaf/temporal-seats/internal/entities/seat"
 	"github.com/EyalShahaf/temporal-seats/internal/workflows"
+	"go.temporal.io/api/serviceerror"
 	"go.temporal.io/sdk/client"
 )
 
@@ -119,6 +121,12 @@ func (h *OrderHandler) getStatusHandler(w http.ResponseWriter, r *http.Request) 
 	workflowID := "order::" + orderID
 	resp, err := h.temporal.QueryWorkflow(r.Context(), workflowID, "", workflows.GetStatusQuery)
 	if err != nil {
+		var notFoundErr *serviceerror.NotFound
+		if errors.As(err, &notFoundErr) {
+			http.Error(w, "Order not found", http.StatusNotFound)
+			return
+		}
+
 		log.Printf("Failed to query workflow: %v", err)
 		http.Error(w, "Failed to get order status", http.StatusInternalServerError)
 		return
@@ -142,18 +150,65 @@ func (h *OrderHandler) sseHandler(w http.ResponseWriter, r *http.Request) {
 	workflowID := "order::" + orderID
 	log.Printf("Handler called: sseHandler for order %s\n", orderID)
 
-	// Set headers for SSE
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("Connection", "keep-alive")
-
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		http.Error(w, "Streaming unsupported!", http.StatusInternalServerError)
 		return
 	}
 
-	// Periodically query the workflow and send updates
+	headersWritten := false
+
+	writeUpdate := func() bool {
+		resp, err := h.temporal.QueryWorkflow(r.Context(), workflowID, "", workflows.GetStatusQuery)
+		if err != nil {
+			var notFoundErr *serviceerror.NotFound
+			if errors.As(err, &notFoundErr) {
+				http.Error(w, "Order not found", http.StatusNotFound)
+				return false
+			}
+
+			// Don't log here as it will be noisy if workflow is not found yet, just stop streaming
+			return false
+		}
+
+		var state workflows.OrderState
+		if err := resp.Get(&state); err != nil {
+			log.Printf("Failed to decode workflow state for SSE: %v", err)
+			return true // try again next tick
+		}
+
+		if !headersWritten {
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.Header().Set("Cache-Control", "no-cache")
+			w.Header().Set("Connection", "keep-alive")
+			headersWritten = true
+		}
+
+		jsonData, err := json.Marshal(state)
+		if err != nil {
+			log.Printf("Failed to marshal state for SSE: %v", err)
+			return true
+		}
+
+		if _, err := w.Write([]byte("data: ")); err != nil {
+			return false
+		}
+		if _, err := w.Write(jsonData); err != nil {
+			return false
+		}
+		if _, err := w.Write([]byte("\n\n")); err != nil {
+			return false
+		}
+
+		flusher.Flush()
+
+		return true
+	}
+
+	if !writeUpdate() {
+		return
+	}
+
 	ticker := time.NewTicker(1 * time.Second)
 	defer ticker.Stop()
 
@@ -163,37 +218,9 @@ func (h *OrderHandler) sseHandler(w http.ResponseWriter, r *http.Request) {
 			log.Println("Client disconnected from SSE stream")
 			return
 		case <-ticker.C:
-			resp, err := h.temporal.QueryWorkflow(r.Context(), workflowID, "", workflows.GetStatusQuery)
-			if err != nil {
-				// Don't log here as it will be noisy if workflow is not found yet, just stop streaming
+			if !writeUpdate() {
 				return
 			}
-
-			var state workflows.OrderState
-			if err := resp.Get(&state); err != nil {
-				log.Printf("Failed to decode workflow state for SSE: %v", err)
-				continue // try again next tick
-			}
-
-			// Marshal state to JSON and write to stream
-			jsonData, err := json.Marshal(state)
-			if err != nil {
-				log.Printf("Failed to marshal state for SSE: %v", err)
-				continue
-			}
-
-			// SSE format: "data: <json>\n\n"
-			if _, err := w.Write([]byte("data: ")); err != nil {
-				return
-			}
-			if _, err := w.Write(jsonData); err != nil {
-				return
-			}
-			if _, err := w.Write([]byte("\n\n")); err != nil {
-				return
-			}
-
-			flusher.Flush()
 		}
 	}
 }

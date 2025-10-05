@@ -10,7 +10,9 @@ import (
 	"github.com/EyalShahaf/temporal-seats/internal/workflows"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
+	"go.temporal.io/api/serviceerror"
 	"go.temporal.io/sdk/client"
+	"go.temporal.io/sdk/converter"
 )
 
 // MockTemporalClient is a mock for the Temporal client.
@@ -18,6 +20,12 @@ type MockTemporalClient struct {
 	client.Client
 	mock.Mock
 }
+
+type flusherResponseRecorder struct {
+	*httptest.ResponseRecorder
+}
+
+func (f *flusherResponseRecorder) Flush() {}
 
 func (m *MockTemporalClient) ExecuteWorkflow(
 	ctx context.Context,
@@ -79,6 +87,25 @@ func (m *MockTemporalClient) SignalWorkflow(ctx context.Context, workflowID stri
 	return args.Error(0)
 }
 
+func (m *MockTemporalClient) QueryWorkflow(
+	ctx context.Context,
+	workflowID string,
+	runID string,
+	queryType string,
+	args ...interface{},
+) (converter.EncodedValue, error) {
+	callArgs := []interface{}{ctx, workflowID, runID, queryType}
+	callArgs = append(callArgs, args...)
+	ret := m.Called(callArgs...)
+
+	var value converter.EncodedValue
+	if v := ret.Get(0); v != nil {
+		value = v.(converter.EncodedValue)
+	}
+
+	return value, ret.Error(1)
+}
+
 func TestOrderHandler_UpdateSeats(t *testing.T) {
 	mockTemporal := new(MockTemporalClient)
 	handler := NewOrderHandler(mockTemporal)
@@ -106,5 +133,61 @@ func TestOrderHandler_UpdateSeats(t *testing.T) {
 	handler.updateSeatsHandler(rr, req)
 
 	require.Equal(t, http.StatusOK, rr.Code)
+	mockTemporal.AssertExpectations(t)
+}
+
+func TestOrderHandler_GetStatus_NotFound(t *testing.T) {
+	mockTemporal := new(MockTemporalClient)
+	handler := NewOrderHandler(mockTemporal)
+
+	orderID := "missing-order"
+
+	mockTemporal.
+		On(
+			"QueryWorkflow",
+			mock.Anything,
+			"order::"+orderID,
+			"",
+			workflows.GetStatusQuery,
+		).
+		Return(nil, serviceerror.NewNotFound("workflow not found")).
+		Once()
+
+	req := httptest.NewRequest(http.MethodGet, "/orders/"+orderID+"/status", nil)
+	req.SetPathValue("id", orderID)
+	rr := httptest.NewRecorder()
+
+	handler.getStatusHandler(rr, req)
+
+	require.Equal(t, http.StatusNotFound, rr.Code)
+	require.Contains(t, rr.Body.String(), "Order not found")
+	mockTemporal.AssertExpectations(t)
+}
+
+func TestOrderHandler_SSE_NotFound(t *testing.T) {
+	mockTemporal := new(MockTemporalClient)
+	handler := NewOrderHandler(mockTemporal)
+
+	orderID := "missing-order"
+
+	mockTemporal.
+		On(
+			"QueryWorkflow",
+			mock.Anything,
+			"order::"+orderID,
+			"",
+			workflows.GetStatusQuery,
+		).
+		Return(nil, serviceerror.NewNotFound("workflow not found")).
+		Once()
+
+	req := httptest.NewRequest(http.MethodGet, "/orders/"+orderID+"/events", nil)
+	req.SetPathValue("id", orderID)
+	rr := &flusherResponseRecorder{ResponseRecorder: httptest.NewRecorder()}
+
+	handler.sseHandler(rr, req)
+
+	require.Equal(t, http.StatusNotFound, rr.Code)
+	require.Contains(t, rr.Body.String(), "Order not found")
 	mockTemporal.AssertExpectations(t)
 }
