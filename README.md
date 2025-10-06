@@ -35,11 +35,18 @@ The application features a modern, dark-themed UI for seat selection and payment
 ## 🚀 Quick Start
 
 ```bash
-# Start everything
+# Start everything (Temporal + API + Worker + UI)
 make up && make run
+```
 
-# Open UI
-cd ui && npm install && npm run dev
+**Success output:**
+```
+🚀 All services are running!
+📱 React UI:     http://localhost:5173
+🔧 API Server:   http://localhost:8080
+⏰ Temporal UI:  http://localhost:8088
+
+Use 'make stop' to kill all processes.
 ```
 
 **Access Points:**
