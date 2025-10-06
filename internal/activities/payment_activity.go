@@ -21,12 +21,6 @@ func ValidatePaymentActivity(ctx context.Context, orderID string, paymentCode st
 		return "", errors.New("invalid payment code")
 	}
 
-	// Force failure for debugging
-	if paymentCode == "INVALID-PAYMENT" {
-		logger.Error("FORCED FAILURE for INVALID-PAYMENT", "OrderID", orderID, "PaymentCode", paymentCode)
-		return "", errors.New("FORCED FAILURE for INVALID-PAYMENT")
-	}
-
 	// Deterministic success for E2E tests
 	if paymentCode == "E2E-OK" {
 		logger.Info("E2E deterministic payment - always succeed", "OrderID", orderID, "PaymentCode", paymentCode)
@@ -40,11 +34,10 @@ func ValidatePaymentActivity(ctx context.Context, orderID string, paymentCode st
 	// Simulate random failure for valid payment codes
 	// Seed the random number generator to ensure different results each time
 	rand.Seed(time.Now().UnixNano())
-	// Temporarily disable random failures for debugging
-	// if rand.Float32() < 0.15 {
-	//	logger.Error("Payment validation failed due to simulated random error.", "OrderID", orderID)
-	//	return "", errors.New("payment gateway failed")
-	// }
+	if rand.Float32() < 0.15 {
+		logger.Error("Payment validation failed due to simulated random error.", "OrderID", orderID)
+		return "", errors.New("payment gateway failed")
+	}
 
 	// Simulate work
 	time.Sleep(1 * time.Second)

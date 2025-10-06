@@ -545,10 +545,6 @@ func TestErrorHandling(t *testing.T) {
 		require.Equal(t, 201, resp.StatusCode)
 		defer resp.Body.Close()
 
-		// Debug: Check the response body
-		body, _ := io.ReadAll(resp.Body)
-		t.Logf("Order creation response: %s", string(body))
-
 		// Wait for workflow to be queryable
 		t.Log("⏳ Waiting for workflow to be queryable...")
 		require.Eventually(t, func() bool {
