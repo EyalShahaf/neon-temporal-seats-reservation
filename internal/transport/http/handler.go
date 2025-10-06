@@ -102,10 +102,15 @@ func (h *OrderHandler) submitPaymentHandler(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	log.Printf("Handler called: submitPaymentHandler for order %s\n", orderID)
+	log.Printf("Handler called: submitPaymentHandler for order %s with payment code: %s\n", orderID, req.Code)
 
 	err := h.temporal.SignalWorkflow(r.Context(), workflowID, "", workflows.SubmitPaymentSignal, req.Code)
 	if err != nil {
+		var notFoundErr *serviceerror.NotFound
+		if errors.As(err, &notFoundErr) {
+			http.Error(w, "Order not found", http.StatusNotFound)
+			return
+		}
 		log.Printf("Failed to signal workflow: %v", err)
 		http.Error(w, "Failed to submit payment", http.StatusInternalServerError)
 		return

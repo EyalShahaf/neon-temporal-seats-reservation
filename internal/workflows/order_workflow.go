@@ -142,6 +142,8 @@ func OrderOrchestrationWorkflow(ctx workflow.Context, input OrderInput) error {
 			var paymentCode string
 			c.Receive(ctx, &paymentCode)
 
+			logger.Info("Received payment signal", "PaymentCode", paymentCode, "AttemptsLeft", state.AttemptsLeft)
+
 			if state.AttemptsLeft <= 0 {
 				logger.Warn("No payment attempts left.")
 				state.PaymentStatus = "failed"
@@ -151,13 +153,12 @@ func OrderOrchestrationWorkflow(ctx workflow.Context, input OrderInput) error {
 
 			// Emit payment trying signal
 			state.PaymentStatus = "trying"
-			logger.Info("Payment attempt started", "AttemptsLeft", state.AttemptsLeft)
+			logger.Info("Payment attempt started", "AttemptsLeft", state.AttemptsLeft, "PaymentCode", paymentCode)
 
 			// Set up activity options with built-in retry policy
 			activityOpts := workflow.ActivityOptions{
 				StartToCloseTimeout: 10 * time.Second,
 				RetryPolicy: &temporal.RetryPolicy{
-					MaximumAttempts:    3, // Use Temporal's built-in retry mechanism
 					InitialInterval:    1 * time.Second,
 					MaximumInterval:    5 * time.Second,
 					BackoffCoefficient: 2.0,
@@ -170,7 +171,7 @@ func OrderOrchestrationWorkflow(ctx workflow.Context, input OrderInput) error {
 			err := workflow.ExecuteActivity(ctx, activities.ValidatePaymentActivity, input.OrderID, paymentCode).Get(ctx, &result)
 
 			if err != nil {
-				logger.Error("Payment activity failed after all retries", "error", err)
+				logger.Error("Payment activity failed after all retries", "error", err, "AttemptsLeft", state.AttemptsLeft)
 				state.LastPaymentErr = err.Error()
 				state.PaymentStatus = "failed"
 
@@ -180,7 +181,7 @@ func OrderOrchestrationWorkflow(ctx workflow.Context, input OrderInput) error {
 					logger.Info("Payment failed, will retry", "AttemptsLeft", state.AttemptsLeft)
 				} else {
 					state.State = "FAILED"
-					logger.Error("Order failed after maximum payment attempts.")
+					logger.Error("Order failed after maximum payment attempts.", "AttemptsLeft", state.AttemptsLeft)
 				}
 			} else {
 				logger.Info("Payment successful")
