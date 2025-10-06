@@ -105,7 +105,7 @@ const OrderPage: React.FC = () => {
         {/* Order Info Header */}
         <div className="bg-gray-800 rounded-lg shadow-2xl border border-cyan-500/20 p-6">
           <div className="flex items-center justify-between mb-4">
-            <h1 className="text-2xl font-bold text-cyan-400 font-mono">Temporal Seats</h1>
+            <h1 className="text-2xl font-bold text-cyan-400 font-sans tracking-wide">Temporal Seats</h1>
             <div className="text-sm text-gray-400 font-mono">
               Flight: {FLIGHT_ID}
             </div>
